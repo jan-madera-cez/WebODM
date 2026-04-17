@@ -6,6 +6,7 @@ import AssetDownloadButtons from './components/AssetDownloadButtons';
 import Standby from './components/Standby';
 import ShareButton from './components/ShareButton';
 import ImagePopup from './components/ImagePopup';
+import MediaView from './components/MediaView';
 import Utils from './classes/Utils';
 import PropTypes from 'prop-types';
 import PluginsAPI from './classes/plugins/API';
@@ -153,10 +154,63 @@ class CamerasMenu extends React.Component{
     }
 }
 
+class PanoramasMenu extends React.Component{
+    static propTypes = {
+        togglePanoramas: PropTypes.func.isRequired,
+        changePanoramaMarkerSize: PropTypes.func.isRequired,
+        initialSize: PropTypes.number.isRequired
+    }
+
+    constructor(props){
+        super(props);
+
+        this.state = {
+            showPanoramas: false
+        };
+    }
+
+    componentDidMount(){
+        if (this.sldPanoramaSize){
+            $(this.sldPanoramaSize).slider({
+                min: 0.05, max: 1.0, step: 0.025,
+                value: this.props.initialSize,
+                slide: (event, ui) => {
+                    this.props.changePanoramaMarkerSize(ui.value);
+                }
+            });
+        }
+    }
+
+    handleClick = (e) => {
+        this.setState({showPanoramas: e.target.checked});
+        this.props.togglePanoramas(e);
+    }
+
+    render(){
+        return (<div>
+            <div><label><input type="checkbox"
+                    checked={this.state.showPanoramas}
+                    onChange={this.handleClick}
+                /> {_("Show Panoramas")}</label>
+            </div>
+            <div style={{marginTop: 12}}>
+                <span>{_("Marker size")}</span>
+                <div ref={domNode => this.sldPanoramaSize = domNode}></div>
+            </div>
+            </div>);
+    }
+}
+
 const CAMERA_SCALES = {
     'm': 1.0,
     'ft': 3.28,
     'US survey foot': 3.28
+};
+
+const PANORAMA_MARKER_SIZES = {
+    'm': 0.1,
+    'ft': 0.328,
+    'US survey foot': 0.328
 };
 
 class ModelView extends React.Component {
@@ -183,8 +237,10 @@ class ModelView extends React.Component {
       initializingModel: false,
       texModelLoadProgress: null,
       selectedCamera: null,
+      selectedPanorama: null,
       modalOpen: false,
       cameraScale: CAMERA_SCALES[props.task.srs.units] || 1.0,
+      panoramaMarkerSize: PANORAMA_MARKER_SIZES[props.task.srs.units] || 0.1,
       pluginActionButtons: []
     };
 
@@ -192,6 +248,11 @@ class ModelView extends React.Component {
     this.modelReference = null;
 
     this.cameraMeshes = [];
+    this.panoramaMeshes = [];
+    this.panoramaOverlayScene = new THREE.Scene();
+    this.panoramaMarkerTexture = null;
+    this.loadingPanoramas = false;
+    this.panoramaMarkersLoaded = false;
   }
 
   basePath = () => {
@@ -200,6 +261,10 @@ class ModelView extends React.Component {
 
   assetsPath = () => {
     return `${this.basePath()}/assets`;
+  }
+
+  mediaBasePath = () => {
+    return `${this.basePath()}/media`;
   }
 
   urlExists = (url, cb) => {
@@ -284,6 +349,23 @@ class ModelView extends React.Component {
 
   hasCameras = () => {
     return this.props.task.available_assets.indexOf('shots.geojson') !== -1;
+  }
+
+  addPanoramasMenu(){
+    if ($("#panoramas_container").length) return;
+
+    const $container = $(`
+        <div id="panoramas_container">
+            <h3 id="panoramas">${_("Panoramas")}</h3>
+            <div id="panoramas_button"></div>
+        </div>
+    `);
+
+    if ($("#cameras_container").length){
+        $container.insertAfter($("#cameras_container"));
+    }else{
+        $container.insertBefore($("#scene_export").parent());
+    }
   }
 
   objFilePath = (cb) => {
@@ -394,6 +476,13 @@ class ModelView extends React.Component {
           $("#cameras").hide();
           $("#cameras_container").hide();
       }
+
+      this.addPanoramasMenu();
+      window.ReactDOM.render(<PanoramasMenu
+            togglePanoramas={this.togglePanoramas}
+            changePanoramaMarkerSize={this.changePanoramaMarkerSize}
+            initialSize={this.state.panoramaMarkerSize}
+        />, $("#panoramas_button").get(0));
 
       if (!this.props.public){
           const $scv = $("<div id='set-camera-view'></div>");
@@ -521,6 +610,7 @@ class ModelView extends React.Component {
     viewer.renderer.domElement.addEventListener( 'mousedown', this.handleRenderMouseClick );
     viewer.renderer.domElement.addEventListener( 'mousemove', this.handleRenderMouseMove );
     viewer.renderer.domElement.addEventListener( 'touchstart', this.handleRenderTouchStart );
+    viewer.addEventListener("render.pass.perspective_overlay", this.renderPanoramaOverlay);
     
     PluginsAPI.ModelView.triggerAddActionButton({
       viewer
@@ -567,28 +657,111 @@ class ModelView extends React.Component {
     viewer.renderer.domElement.removeEventListener( 'mousedown', this.handleRenderMouseClick );
     viewer.renderer.domElement.removeEventListener( 'mousemove', this.handleRenderMouseMove );
     viewer.renderer.domElement.removeEventListener( 'touchstart', this.handleRenderTouchStart );
-    
+    viewer.removeEventListener("render.pass.perspective_overlay", this.renderPanoramaOverlay);
+
+    this.cameraMeshes.forEach(cam => {
+        if (cam.parent) viewer.scene.scene.remove(cam.parent);
+    });
+    this.panoramaMeshes.forEach(marker => {
+        this.panoramaOverlayScene.remove(marker);
+        if (marker.material) marker.material.dispose();
+    });
+    if (this.panoramaMarkerTexture) {
+        this.panoramaMarkerTexture.dispose();
+        this.panoramaMarkerTexture = null;
+    }
   }
 
-  getCameraUnderCursor = (evt) => {
+  getPanoramaMarkerTexture = () => {
+    if (this.panoramaMarkerTexture) return this.panoramaMarkerTexture;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext('2d');
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.beginPath();
+    context.arc(64, 64, 48, 0, Math.PI * 2);
+    context.fillStyle = '#ff9800';
+    context.fill();
+
+    context.lineWidth = 8;
+    context.strokeStyle = '#ffffff';
+    context.stroke();
+
+    context.beginPath();
+    context.arc(64, 64, 18, 0, Math.PI * 2);
+    context.fillStyle = '#1f1f1f';
+    context.fill();
+
+    this.panoramaMarkerTexture = new THREE.CanvasTexture(canvas);
+    return this.panoramaMarkerTexture;
+  }
+
+  createPanoramaMarker = (entry, visible) => {
+    const material = new THREE.SpriteMaterial({
+        map: this.getPanoramaMarkerTexture(),
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        opacity: 1.0,
+        sizeAttenuation: true
+    });
+
+    const marker = new THREE.Sprite(material);
+    marker._media = entry;
+    marker._position = entry.position;
+    marker.center.set(0.5, 0.5);
+    marker.renderOrder = 9999;
+    marker.visible = visible;
+
+    const markerSize = this.state.panoramaMarkerSize;
+    marker.scale.set(markerSize, markerSize, 1);
+    marker.position.set(entry.position[0], entry.position[1], entry.position[2]);
+    return marker;
+  }
+
+  renderPanoramaOverlay = () => {
+    if (!this.panoramaMeshes.some(marker => marker.visible)) return;
+
+    const camera = viewer.scene.getActiveCamera();
+    viewer.renderer.render(this.panoramaOverlayScene, camera);
+  }
+
+  getIntersectionUnderCursor = (evt, objects) => {
     const raycaster = new THREE.Raycaster();
     const rect = viewer.renderer.domElement.getBoundingClientRect();
     const [x, y] = [evt.clientX, evt.clientY];
-    const array = [ 
-        ( x - rect.left ) / rect.width, 
-        ( y - rect.top ) / rect.height 
+    const array = [
+        (x - rect.left) / rect.width,
+        (y - rect.top) / rect.height
     ];
     const onClickPosition = new THREE.Vector2(...array);
     const camera = viewer.scene.getActiveCamera();
     const mouse = new THREE.Vector3(
-        + ( onClickPosition.x * 2 ) - 1, 
-        - ( onClickPosition.y * 2 ) + 1 );
-    raycaster.setFromCamera( mouse, camera );
-    const intersects = raycaster.intersectObjects( this.cameraMeshes );
+        + (onClickPosition.x * 2) - 1,
+        - (onClickPosition.y * 2) + 1
+    );
+    raycaster.setFromCamera(mouse, camera);
 
-    if ( intersects.length > 0){
-        const intersection = intersects[0];
-        return intersection.object.parent.parent;
+    const intersects = raycaster.intersectObjects(objects);
+    if (intersects.length > 0){
+        return intersects[0].object;
+    }
+  }
+
+  getCameraUnderCursor = (evt) => {
+    const cameraMesh = this.getIntersectionUnderCursor(evt, this.cameraMeshes);
+    if (cameraMesh){
+        return cameraMesh.parent.parent;
+    }
+  }
+
+  getPanoramaUnderCursor = (evt) => {
+    const marker = this.getIntersectionUnderCursor(evt, this.panoramaMeshes);
+    if (marker){
+        return marker._media;
     }
   }
 
@@ -604,9 +777,12 @@ class ModelView extends React.Component {
     }
 
     const camera = this.getCameraUnderCursor(evt);
+    const panorama = camera ? null : this.getPanoramaUnderCursor(evt);
     if (camera){
         viewer.renderer.domElement.classList.add("pointer-cursor");
         this.setCameraOpacity(camera, 1);
+    }else if (panorama){
+        viewer.renderer.domElement.classList.add("pointer-cursor");
     }else{
         viewer.renderer.domElement.classList.remove("pointer-cursor");
     }
@@ -623,18 +799,32 @@ class ModelView extends React.Component {
     let camera = this.getCameraUnderCursor(evt);
     // Deselect
     if (camera === this.state.selectedCamera){
-        this.setState({selectedCamera: null});
+        this.setState({selectedCamera: null, selectedPanorama: null});
     }else if (camera){
         if (this.state.selectedCamera){
             this.setCameraOpacity(this.state.selectedCamera, 0.7);
         }
-        this.setState({selectedCamera: camera});
+        this.setState({selectedCamera: camera, selectedPanorama: null});
+    }else{
+        const panorama = this.getPanoramaUnderCursor(evt);
+        if (panorama && this.state.selectedPanorama && this.state.selectedPanorama.filename === panorama.filename){
+            this.setState({selectedPanorama: null});
+        }else if (panorama){
+            if (this.state.selectedCamera){
+                this.setCameraOpacity(this.state.selectedCamera, 0.7);
+            }
+            this.setState({selectedCamera: null, selectedPanorama: panorama});
+        }
     }
   }
 
   closeThumb = (e) => {
     e.stopPropagation();
     this.setState({selectedCamera: null});
+  }
+
+  closePanorama = () => {
+    this.setState({selectedPanorama: null});
   }
 
   loadCameras(){
@@ -700,7 +890,35 @@ class ModelView extends React.Component {
                 });
             }, undefined, console.error);
         });
-    }
+      }
+  }
+
+  loadPanoramas = (visible) => {
+    if (this.loadingPanoramas || this.panoramaMarkersLoaded) return;
+
+    this.loadingPanoramas = true;
+    $.ajax({
+        type: "GET",
+        url: `${this.mediaBasePath()}/`
+    }).done(entries => {
+        const panoramas = (entries || []).filter(entry =>
+            entry.type === 'pano' &&
+            Array.isArray(entry.position) &&
+            entry.position.length === 3
+        );
+
+        panoramas.forEach(entry => {
+            const marker = this.createPanoramaMarker(entry, visible);
+            this.panoramaOverlayScene.add(marker);
+            this.panoramaMeshes.push(marker);
+        });
+
+        this.panoramaMarkersLoaded = true;
+    }).fail(err => {
+        console.error("Cannot load panorama media", err);
+    }).always(() => {
+        this.loadingPanoramas = false;
+    });
   }
 
   setPointCloudsVisible = (flag) => {
@@ -735,8 +953,32 @@ class ModelView extends React.Component {
   changeCameraScale = (value) => {
     if (this.cameraMeshes.length === 0) return;
 
-    this.cameraMeshes.forEach(cam => {
-        cam.parent.scale.setScalar(value);
+      this.cameraMeshes.forEach(cam => {
+          cam.parent.scale.setScalar(value);
+      });
+  }
+
+  togglePanoramas = (e) => {
+    const visible = e.target.checked;
+    if (visible && !this.panoramaMarkersLoaded){
+        this.loadPanoramas(true);
+        return;
+    }
+
+    this.panoramaMeshes.forEach(marker => {
+        marker.visible = visible;
+    });
+  }
+
+  changePanoramaMarkerSize = (value) => {
+    this.setState({panoramaMarkerSize: value});
+    this.panoramaMeshes.forEach(marker => {
+        marker.scale.set(value, value, 1);
+        marker.position.set(
+            marker._position[0],
+            marker._position[1],
+            marker._position[2]
+        );
     });
   }
 
@@ -839,7 +1081,7 @@ class ModelView extends React.Component {
 
   // React render
   render(){
-    const { selectedCamera, showingTexturedModel } = this.state;
+    const { selectedCamera, selectedPanorama, showingTexturedModel } = this.state;
     const { task } = this.props;
     const queryParams = {};
     if (showingTexturedModel){
@@ -885,6 +1127,14 @@ class ModelView extends React.Component {
             <a className="close-thumb" href="javascript:void(0)" onClick={this.closeThumb}><i className="fa fa-window-close"></i></a>
             <ImagePopup feature={selectedCamera._feat} task={task} />
         </div> : ""}
+
+        {selectedPanorama ? <MediaView
+            key={selectedPanorama.filename}
+            basePath={this.mediaBasePath()}
+            media={selectedPanorama}
+            autoOpen
+            onClose={this.closePanorama}
+        /> : ""}
 
           <Standby 
             message={_("Loading textured model...")}

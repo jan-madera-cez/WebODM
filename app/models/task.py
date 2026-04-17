@@ -1304,7 +1304,7 @@ class Task(models.Model):
             return 'photo'
         return None
 
-    def build_media_entry(self, filepath):
+    def build_media_entry(self, filepath, existing_media=None):
         filename = os.path.basename(filepath)
         media_type = self.get_media_type(filepath)
         if media_type is None:
@@ -1312,10 +1312,11 @@ class Task(models.Model):
 
         size = os.path.getsize(filepath)
         geolocation = None
+        existing_entries = self.media if existing_media is None else existing_media
 
         existing = None
-        if self.media:
-            for entry in self.media:
+        if existing_entries:
+            for entry in existing_entries:
                 if entry.get('filename') == filename:
                     existing = entry
                     break   
@@ -1326,6 +1327,8 @@ class Task(models.Model):
             'description': existing.get('description', '') if existing else '',
             'size': size,
         }
+        if existing and 'position' in existing:
+            entry['position'] = existing['position']
 
         if media_type in ['photo', 'pano']:
             geolocation = extract_gps_from_image(filepath)
@@ -1357,12 +1360,18 @@ class Task(models.Model):
                     self.save()
             return
 
+        existing_media = self.media or []
+        if self.pk:
+            current = Task.objects.filter(pk=self.pk).values_list('media', flat=True).first()
+            if current is not None:
+                existing_media = current
+
         entries = []
         for f in os.listdir(media_dir):
             fp = os.path.join(media_dir, f)
             if not os.path.isfile(fp):
                 continue
-            entry = self.build_media_entry(fp)
+            entry = self.build_media_entry(fp, existing_media=existing_media)
             if entry is not None:
                 entries.append(entry)
 

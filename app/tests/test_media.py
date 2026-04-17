@@ -105,6 +105,42 @@ class TestMedia(BootTestCase):
         task.refresh_from_db()
         self.assertEqual(task.media[0]['description'], 'hello')
 
+        # Patch local 3D position
+        res = client.patch(
+            "/api/projects/{}/tasks/{}/media/manage/a.jpg".format(project.id, task.id),
+            {'position': [1, 2, 3]},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        self.assertEqual(task.media[0]['position'], [1.0, 2.0, 3.0])
+
+        # Preserve local 3D position on media refresh
+        task.update_media_field(commit=True)
+        task.refresh_from_db()
+        self.assertEqual(task.media[0]['position'], [1.0, 2.0, 3.0])
+
+        # Preserve local 3D position when a stale task instance refreshes media
+        stale_task = Task.objects.get(pk=task.pk)
+        res = client.patch(
+            "/api/projects/{}/tasks/{}/media/manage/a.jpg".format(project.id, task.id),
+            {'description': 'from-latest', 'position': [4, 5, 6]},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        stale_task.update_media_field(commit=True)
+        task.refresh_from_db()
+        self.assertEqual(task.media[0]['description'], 'from-latest')
+        self.assertEqual(task.media[0]['position'], [4.0, 5.0, 6.0])
+
+        # Reject invalid local 3D position
+        res = client.patch(
+            "/api/projects/{}/tasks/{}/media/manage/a.jpg".format(project.id, task.id),
+            {'position': [1, 2]},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
         # No access from another user (patch)
         res = other_client.patch("/api/projects/{}/tasks/{}/media/manage/a.jpg".format(project.id, task.id), {'description': 'x'}, format='json')
         self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)

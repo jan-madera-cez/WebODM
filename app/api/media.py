@@ -198,6 +198,19 @@ class TaskMediaUpload(TaskMediaBase):
 class TaskMediaManage(TaskMediaBase):
     parser_classes = (parsers.JSONParser, parsers.FormParser, parsers.MultiPartParser)
 
+    @staticmethod
+    def validate_position(value):
+        if value is None:
+            return None
+
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise exceptions.ValidationError(detail=_("Position must be a three-element array"))
+
+        try:
+            return [float(value[0]), float(value[1]), float(value[2])]
+        except (TypeError, ValueError):
+            raise exceptions.ValidationError(detail=_("Position values must be numeric"))
+
     def get(self, request, pk=None, project_pk=None, filename=None):
         task = self.get_and_check_task(request, pk)
         if not task.media:
@@ -224,6 +237,8 @@ class TaskMediaManage(TaskMediaBase):
                 if entry['filename'] == filename:
                     if 'description' in request.data:
                         entry['description'] = str(request.data['description'])[:4096]
+                    if 'position' in request.data:
+                        entry['position'] = self.validate_position(request.data['position'])
                     found = True
                     break
 
