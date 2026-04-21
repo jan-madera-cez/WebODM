@@ -38,6 +38,8 @@ DEFAULT_SSL="$WO_SSL"
 DEFAULT_SSL_INSECURE_PORT_REDIRECT="$WO_SSL_INSECURE_PORT_REDIRECT"
 DEFAULT_BROKER="$WO_BROKER"
 DEFAULT_NODES="$WO_DEFAULT_NODES"
+DEFAULT_CONTAINER_ENGINE="${WO_CONTAINER_ENGINE:-docker}"
+DEFAULT_COMPOSE_COMMAND="${WO_COMPOSE_COMMAND:-auto}"
 
 # Parse args for overrides
 POSITIONAL=()
@@ -169,24 +171,24 @@ fi
 usage(){
   echo "Usage: $0 <command>"
   echo
-  echo "This program helps to manage the setup/teardown of the docker containers for running WebODM. We recommend that you read the full documentation of docker at https://docs.docker.com if you want to customize your setup."
+  echo "This program helps to manage the setup/teardown of the containers for running WebODM."
   echo
   echo "Command list:"
-  echo "	start [options]		Start WebODM"
-  echo "	stop			Stop WebODM"
-  echo "	down			Stop and remove WebODM's docker containers"
-  echo "	update			Update WebODM to the latest release"
-  echo "	liveupdate		Update WebODM to the latest release without stopping it"
-  echo "	rebuild			Rebuild all docker containers and perform cleanups"
-  echo "	checkenv		Do an environment check and install missing components"
-  echo "	test [frontend|backend] [args]	Run tests (all tests, or just frontend/backend with optional arguments)"
-  echo "	resetadminpassword \"<new password>\"	Reset the administrator's password to a new one. WebODM must be running when executing this command and the password must be enclosed in double quotes."
+	echo "	start [options]		Start WebODM"
+	echo "	stop			Stop WebODM"
+  echo "	down			Stop and remove WebODM's containers"
+	echo "	update			Update WebODM to the latest release"
+	echo "	liveupdate		Update WebODM to the latest release without stopping it"
+  echo "	rebuild			Rebuild all containers and perform cleanups"
+	echo "	checkenv		Do an environment check and install missing components"
+	echo "	test [frontend|backend] [args]	Run tests (all tests, or just frontend/backend with optional arguments)"
+	echo "	resetadminpassword \"<new password>\"	Reset the administrator's password to a new one. WebODM must be running when executing this command and the password must be enclosed in double quotes."
   echo ""
   echo "Options:"
   echo "	--port	<port>	Set the port that WebODM should bind to (default: $DEFAULT_PORT)"
   echo "	--hostname	<hostname>	Set the hostname that WebODM will be accessible from (default: $DEFAULT_HOST)"
-  echo "	--media-dir	<path>	Path where processing results will be stored to (default: $DEFAULT_MEDIA_DIR (docker named volume))"
-  echo "	--db-dir	<path>	Path where the Postgres db data will be stored to (default: $DEFAULT_DB_DIR (docker named volume))"
+  echo "	--media-dir	<path>	Path where processing results will be stored to (default: $DEFAULT_MEDIA_DIR (named volume))"
+  echo "	--db-dir	<path>	Path where the Postgres db data will be stored to (default: $DEFAULT_DB_DIR (named volume))"
   echo "	--default-nodes	Whether to create a processing node attached to WebODM on startup (default: $DEFAULT_NODES)"
   echo "	--with-micmac	Create a NodeMICMAC node attached to WebODM on startup. Experimental! (default: disabled)"
   echo "	--ssl	Enable SSL and automatically request and install a certificate from letsencrypt.org. (default: $DEFAULT_SSL)"
@@ -203,6 +205,10 @@ usage(){
   echo "	--worker-memory	Maximum amount of memory allocated for the worker process (default: unlimited)"
   echo "	--worker-cpus	Maximum number of CPUs allocated for the worker process (default: all)"
   echo "	--ipv6	Enable IPV6"
+  echo
+  echo "Environment overrides:"
+  echo "	WEBODM_CONTAINER_ENGINE / WO_CONTAINER_ENGINE	Container runtime command to use (default: $DEFAULT_CONTAINER_ENGINE)"
+  echo "	WEBODM_COMPOSE_COMMAND / WO_COMPOSE_COMMAND	Compose command to use, for example 'podman compose' (default: $DEFAULT_COMPOSE_COMMAND)"
   
   exit
 }
@@ -257,37 +263,70 @@ if [[ $gpu = true ]]; then
 	detect_gpus
 fi
 
-docker_compose="docker-compose"
+container_runtime="${WEBODM_CONTAINER_ENGINE:-${WO_CONTAINER_ENGINE:-docker}}"
+container_runtime_help_url="https://www.docker.com/"
+if [[ "${container_runtime}" = "podman" ]]; then
+	container_runtime_help_url="https://podman.io/getting-started/"
+fi
+docker_compose=""
 check_docker_compose(){
 	dc_msg_ok="\033[92m\033[1m OK\033[0m\033[39m"
+	unset not_found
 
-	# Check if docker-compose exists
-	hash "docker-compose" 2>/dev/null || not_found=true
-	if [[ $not_found ]]; then
-		# Check if compose plugin is installed
-		if ! docker compose > /dev/null 2>&1; then
-
-			if [ "${platform}" = "Linux" ] && [ -z "$1" ] && [ ! -z "$HOME" ]; then
-				echo -e "Checking for docker compose... \033[93mnot found, we'll attempt to install it\033[39m"
-				check_command "curl" "Cannot automatically install docker compose. Please visit https://docs.docker.com/compose/install/" "" "silent"
-				DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
-				mkdir -p $DOCKER_CONFIG/cli-plugins
-				curl -SL# https://github.com/docker/compose/releases/download/v2.17.2/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
-				chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
-				check_docker_compose "y"
-			else
-				if [ -z "$1" ]; then
-					echo -e "Checking for docker compose... \033[93mnot found, please visit https://docs.docker.com/compose/install/ to install docker compose\033[39m"
-				else
-					echo -e "\033[93mCannot automatically install docker compose. Please visit https://docs.docker.com/compose/install/\033[39m"
-				fi
-				return 1
-			fi
+	if [[ -n "${WEBODM_COMPOSE_COMMAND:-}" ]]; then
+		docker_compose="${WEBODM_COMPOSE_COMMAND}"
+	elif [[ -n "${WO_COMPOSE_COMMAND:-}" ]]; then
+		docker_compose="${WO_COMPOSE_COMMAND}"
+	elif [[ "${container_runtime}" = "podman" ]]; then
+		if podman compose version > /dev/null 2>&1; then
+			docker_compose="podman compose"
+		elif hash "podman-compose" 2>/dev/null; then
+			docker_compose="podman-compose"
 		else
-			docker_compose="docker compose"
+			not_found=true
+			if [ -z "$1" ]; then
+				echo -e "Checking for podman compose... \033[93mnot found, install podman compose or podman-compose\033[39m"
+			fi
 		fi
 	else
-		docker_compose="docker-compose"
+		hash "docker-compose" 2>/dev/null || not_found=true
+		if [[ $not_found ]]; then
+			unset not_found
+			if ! docker compose > /dev/null 2>&1; then
+
+				if [ "${platform}" = "Linux" ] && [ -z "$1" ] && [ ! -z "$HOME" ]; then
+					echo -e "Checking for docker compose... \033[93mnot found, we'll attempt to install it\033[39m"
+					check_command "curl" "Cannot automatically install docker compose. Please visit https://docs.docker.com/compose/install/" "" "silent"
+					DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+					mkdir -p $DOCKER_CONFIG/cli-plugins
+					curl -SL# https://github.com/docker/compose/releases/download/v2.17.2/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
+					chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+					check_docker_compose "y"
+				else
+					not_found=true
+					if [ -z "$1" ]; then
+						echo -e "Checking for docker compose... \033[93mnot found, please visit https://docs.docker.com/compose/install/ to install docker compose\033[39m"
+					else
+						echo -e "\033[93mCannot automatically install docker compose. Please visit https://docs.docker.com/compose/install/\033[39m"
+					fi
+				fi
+			else
+				docker_compose="docker compose"
+			fi
+		else
+			docker_compose="docker-compose"
+		fi
+	fi
+
+	if [[ -z "${docker_compose}" ]]; then
+		return 1
+	fi
+
+	if ! eval "$docker_compose version > /dev/null 2>&1"; then
+		if [ -z "$1" ]; then
+			echo -e "Checking for $docker_compose... \033[93mnot found or not working\033[39m"
+		fi
+		return 1
 	fi
 
 	if [ -z "$1" ]; then
@@ -326,19 +365,21 @@ check_command(){
 
 environment_check(){
     if [[ $WO_DEBUG = "YES" ]]; then
-        local DOCKER_VERSION
+        local CONTAINER_VERSION
         local COMPOSE_VERSION
         local MEDIA_DIR_OWNER
         local DB_DIR_OWNER
         echo "Host environment: $OSTYPE"
-        if [[ "$(groups)" == *"docker"* ]]; then
-            echo "You are in the docker group"
-        else
-            echo "You are not in the docker group"
+        if [[ "${container_runtime}" = "docker" ]]; then
+            if [[ "$(groups)" == *"docker"* ]]; then
+                echo "You are in the docker group"
+            else
+                echo "You are not in the docker group"
+            fi
         fi
     fi
     
-    check_command "docker" "https://www.docker.com/"
+    check_command "$container_runtime" "$container_runtime_help_url"
     check_docker_compose
 
     if [[ $WO_DEBUG = "YES" ]]; then
@@ -355,14 +396,16 @@ environment_check(){
             fi
 
         fi
-        DOCKER_VERSION=$(docker --version)
+        CONTAINER_VERSION=$($container_runtime --version 2> /dev/null | head -n 1)
         # remove stderr in case podman throws complaints, ensure only compose ver is taken
-        COMPOSE_VERSION=$($docker_compose version 2> /dev/null | head -n 1)
-        echo "Docker version: $DOCKER_VERSION"
+        COMPOSE_VERSION=$(eval "$docker_compose version 2> /dev/null | head -n 1")
+        echo "Container engine: $container_runtime"
+        echo "Container version: $CONTAINER_VERSION"
+        echo "Compose command: $docker_compose"
         echo "Compose version: $COMPOSE_VERSION"
-        if [ -z "$DOCKER_HOST" ]; then
+        if [ -z "${DOCKER_HOST:-}" ]; then
             echo "DOCKER_HOST is unset"
-            if [[ "$($docker_compose -v)" != "podman"* ]] && [[ "$DOCKER_VERSION" == "podman"* ]]; then
+            if [[ "$docker_compose" = "docker compose" ]] && [[ "$container_runtime" = "podman" ]]; then
                 echo "You seem to be using podman with docker-compose instead of podman-compose. The above variable may need to be set, see https://docs.webodm.org/tutorials/using-podman/ for more information."
             fi
         else
@@ -530,7 +573,7 @@ rebuild(){
 run_tests(){
     # If in a container, we run the actual test commands
     # otherwise we launch this command from the container
-    if [[ -f /.dockerenv ]]; then
+    if [[ -f /.dockerenv || -f /.containerenv || -f /run/.containerenv ]]; then
         test_type=${1:-"all"}
         shift || true
         
@@ -560,13 +603,13 @@ resetpassword(){
 	newpass=$1
 
 	if [[ -n "$newpass" ]]; then
-		container_hash=$(docker ps -q --filter "name=webapp")
+		container_hash=$($container_runtime ps -q --filter "name=webapp")
 		if [[ -z "$container_hash" ]]; then
-			echo -e "\033[91mCannot find webapp docker container. Is WebODM running?\033[39m"
+			echo -e "\033[91mCannot find webapp container. Is WebODM running?\033[39m"
 			exit 1
 		fi
 
-		if docker exec "$container_hash" bash -c "echo \"from django.contrib.auth.models import User;from django.contrib.auth.hashers import make_password;u=User.objects.filter(is_superuser=True)[0];u.password=make_password('$newpass');u.save();print('The following user was changed: {}'.format(u.username));\" | python manage.py shell"; then
+		if $container_runtime exec "$container_hash" bash -c "echo \"from django.contrib.auth.models import User;from django.contrib.auth.hashers import make_password;u=User.objects.filter(is_superuser=True)[0];u.password=make_password('$newpass');u.save();print('The following user was changed: {}'.format(u.username));\" | python manage.py shell"; then
 			echo -e "\033[1mPassword changed!\033[0m"
 		else
 			echo -e "\033[91mCould not change administrator password. If you need help, please visit https://github.com/WebODM/WebODM/issues/ \033[39m"
