@@ -806,6 +806,26 @@ class TestApiTask(BootTransactionTestCase):
             self.assertEqual(res.status_code, status.HTTP_200_OK)
             self.assertListEqual(res.data['view']['position'], [0,5,0])
             self.assertListEqual(res.data['measurements'], [1, 2])
+            
+            # Scene can preserve custom Detection3D payloads
+            res = client.post(
+                "/api/projects/{}/tasks/{}/3d/scene".format(project.id, task.id),
+                json.dumps({
+                    "type": "Potree",
+                    "sjzDetections": [
+                        {
+                            "label": "103VF291",
+                            "coordinates": [1, 2, 3],
+                        }
+                    ],
+                }),
+                content_type="application/json",
+            )
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+            res = client.get("/api/projects/{}/tasks/{}/3d/scene".format(project.id, task.id))
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            self.assertEqual(res.data["sjzDetections"][0]["label"], "103VF291")
 
             # Cannot access tile 0/0/0
             res = client.get("/api/projects/{}/tasks/{}/orthophoto/tiles/0/0/0.png".format(project.id, task.id))
@@ -1634,4 +1654,3 @@ class TestApiTask(BootTransactionTestCase):
         # Cannot filter with invalid bounding box format
         res = client.get("/api/projects/{}/tasks/?bbox=bad".format(project.id))
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-

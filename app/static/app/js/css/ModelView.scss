@@ -232,6 +232,38 @@
             }
         }
     }
+
+    .detection3d-popup{
+        min-width: 320px;
+        max-width: 420px;
+        padding: 12px 16px 8px 16px;
+
+        .detection3d-popup__title{
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding-right: 24px;
+        }
+
+        th{
+            white-space: nowrap;
+            padding-right: 12px;
+        }
+
+        td, th{
+            color: #ccccff;
+        }
+
+        .detection3d-popup__subtitle{
+            font-weight: 600;
+            margin: 8px 0 6px 0;
+        }
+
+        ul{
+            margin: 0 0 0 18px;
+            padding: 0 0 8px 0;
+        }
+    }
 }
 
 #profile_window{
