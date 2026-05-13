@@ -8,6 +8,7 @@ import ShareButton from './components/ShareButton';
 import ImagePopup from './components/ImagePopup';
 import MediaView from './components/MediaView';
 import Utils from './classes/Utils';
+import Detection3DUtils from './classes/Detection3D';
 import PropTypes from 'prop-types';
 import PluginsAPI from './classes/plugins/API';
 import update from 'immutability-helper';
@@ -201,6 +202,53 @@ class PanoramasMenu extends React.Component{
     }
 }
 
+class Detection3DMenu extends React.Component{
+    static propTypes = {
+        toggleDetection3D: PropTypes.func.isRequired,
+        changeDetection3DMarkerSize: PropTypes.func.isRequired,
+        initialSize: PropTypes.number.isRequired
+    }
+
+    constructor(props){
+        super(props);
+
+        this.state = {
+            showDetections: false
+        };
+    }
+
+    componentDidMount(){
+        if (this.sldDetectionSize){
+            $(this.sldDetectionSize).slider({
+                min: 0.05, max: 1.0, step: 0.025,
+                value: this.props.initialSize,
+                slide: (event, ui) => {
+                    this.props.changeDetection3DMarkerSize(ui.value);
+                }
+            });
+        }
+    }
+
+    handleClick = (e) => {
+        this.setState({showDetections: e.target.checked});
+        this.props.toggleDetection3D(e);
+    }
+
+    render(){
+        return (<div>
+            <div><label><input type="checkbox"
+                    checked={this.state.showDetections}
+                    onChange={this.handleClick}
+                /> {_("Show Detection3D")}</label>
+            </div>
+            <div style={{marginTop: 12}}>
+                <span>{_("Marker size")}</span>
+                <div ref={domNode => this.sldDetectionSize = domNode}></div>
+            </div>
+            </div>);
+    }
+}
+
 const CAMERA_SCALES = {
     'm': 1.0,
     'ft': 3.28,
@@ -211,6 +259,12 @@ const PANORAMA_MARKER_SIZES = {
     'm': 0.1,
     'ft': 0.328,
     'US survey foot': 0.328
+};
+
+const DETECTION3D_MARKER_SIZES = {
+    'm': 0.12,
+    'ft': 0.394,
+    'US survey foot': 0.394
 };
 
 class ModelView extends React.Component {
@@ -238,9 +292,11 @@ class ModelView extends React.Component {
       texModelLoadProgress: null,
       selectedCamera: null,
       selectedPanorama: null,
+      selectedDetection3D: null,
       modalOpen: false,
       cameraScale: CAMERA_SCALES[props.task.srs.units] || 1.0,
       panoramaMarkerSize: PANORAMA_MARKER_SIZES[props.task.srs.units] || 0.1,
+      detection3DMarkerSize: DETECTION3D_MARKER_SIZES[props.task.srs.units] || 0.12,
       pluginActionButtons: []
     };
 
@@ -249,10 +305,14 @@ class ModelView extends React.Component {
 
     this.cameraMeshes = [];
     this.panoramaMeshes = [];
+    this.detection3DMeshes = [];
+    this.detection3DEntries = [];
     this.panoramaOverlayScene = new THREE.Scene();
     this.panoramaMarkerTexture = null;
+    this.detection3DMarkerTexture = null;
     this.loadingPanoramas = false;
     this.panoramaMarkersLoaded = false;
+    this.detection3DMarkersLoaded = false;
   }
 
   basePath = () => {
@@ -366,6 +426,43 @@ class ModelView extends React.Component {
     }else{
         $container.insertBefore($("#scene_export").parent());
     }
+  }
+
+  addDetection3DMenu(){
+    if ($("#detection3d_container").length) return;
+
+    const $container = $(`
+        <div id="detection3d_container" style="display:none">
+            <h3 id="detection3d">${_("Detection3D")}</h3>
+            <div id="detection3d_button"></div>
+        </div>
+    `);
+
+    if ($("#panoramas_container").length){
+        $container.insertAfter($("#panoramas_container"));
+    }else if ($("#cameras_container").length){
+        $container.insertAfter($("#cameras_container"));
+    }else{
+        $container.insertBefore($("#scene_export").parent());
+    }
+  }
+
+  renderDetection3DMenu(){
+    this.addDetection3DMenu();
+
+    if (this.detection3DEntries.length === 0){
+        $("#detection3d").hide();
+        $("#detection3d_container").hide();
+        return;
+    }
+
+    $("#detection3d").show();
+    $("#detection3d_container").show();
+    window.ReactDOM.render(<Detection3DMenu
+          toggleDetection3D={this.toggleDetection3D}
+          changeDetection3DMarkerSize={this.changeDetection3DMarkerSize}
+          initialSize={this.state.detection3DMarkerSize}
+      />, $("#detection3d_button").get(0));
   }
 
   objFilePath = (cb) => {
@@ -483,6 +580,7 @@ class ModelView extends React.Component {
             changePanoramaMarkerSize={this.changePanoramaMarkerSize}
             initialSize={this.state.panoramaMarkerSize}
         />, $("#panoramas_button").get(0));
+      this.renderDetection3DMenu();
 
       if (!this.props.public){
           const $scv = $("<div id='set-camera-view'></div>");
@@ -529,6 +627,9 @@ class ModelView extends React.Component {
               type: "GET",
               url: `/api/projects/${this.props.task.project}/tasks/${this.props.task.id}/3d/scene`
           }).done(sceneData => {
+            this.detection3DEntries = Detection3DUtils.normalizeDetection3DEntries(sceneData);
+            this.renderDetection3DMenu();
+            this.loadDetection3D(false);
             let localSceneData = Potree.saveProject(viewer);
 
             // Check if we do not have a view set
@@ -610,7 +711,7 @@ class ModelView extends React.Component {
     viewer.renderer.domElement.addEventListener( 'mousedown', this.handleRenderMouseClick );
     viewer.renderer.domElement.addEventListener( 'mousemove', this.handleRenderMouseMove );
     viewer.renderer.domElement.addEventListener( 'touchstart', this.handleRenderTouchStart );
-    viewer.addEventListener("render.pass.perspective_overlay", this.renderPanoramaOverlay);
+    viewer.addEventListener("render.pass.perspective_overlay", this.renderOverlay);
     
     PluginsAPI.ModelView.triggerAddActionButton({
       viewer
@@ -657,7 +758,7 @@ class ModelView extends React.Component {
     viewer.renderer.domElement.removeEventListener( 'mousedown', this.handleRenderMouseClick );
     viewer.renderer.domElement.removeEventListener( 'mousemove', this.handleRenderMouseMove );
     viewer.renderer.domElement.removeEventListener( 'touchstart', this.handleRenderTouchStart );
-    viewer.removeEventListener("render.pass.perspective_overlay", this.renderPanoramaOverlay);
+    viewer.removeEventListener("render.pass.perspective_overlay", this.renderOverlay);
 
     this.cameraMeshes.forEach(cam => {
         if (cam.parent) viewer.scene.scene.remove(cam.parent);
@@ -666,9 +767,17 @@ class ModelView extends React.Component {
         this.panoramaOverlayScene.remove(marker);
         if (marker.material) marker.material.dispose();
     });
+    this.detection3DMeshes.forEach(marker => {
+        this.panoramaOverlayScene.remove(marker);
+        if (marker.material) marker.material.dispose();
+    });
     if (this.panoramaMarkerTexture) {
         this.panoramaMarkerTexture.dispose();
         this.panoramaMarkerTexture = null;
+    }
+    if (this.detection3DMarkerTexture) {
+        this.detection3DMarkerTexture.dispose();
+        this.detection3DMarkerTexture = null;
     }
   }
 
@@ -722,8 +831,59 @@ class ModelView extends React.Component {
     return marker;
   }
 
-  renderPanoramaOverlay = () => {
-    if (!this.panoramaMeshes.some(marker => marker.visible)) return;
+  getDetection3DMarkerTexture = () => {
+    if (this.detection3DMarkerTexture) return this.detection3DMarkerTexture;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext('2d');
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.beginPath();
+    context.arc(64, 64, 44, 0, Math.PI * 2);
+    context.fillStyle = '#1e88e5';
+    context.fill();
+
+    context.lineWidth = 8;
+    context.strokeStyle = '#ffffff';
+    context.stroke();
+
+    context.beginPath();
+    context.arc(64, 64, 10, 0, Math.PI * 2);
+    context.fillStyle = '#ffffff';
+    context.fill();
+
+    this.detection3DMarkerTexture = new THREE.CanvasTexture(canvas);
+    return this.detection3DMarkerTexture;
+  }
+
+  createDetection3DMarker = (entry, visible) => {
+    const material = new THREE.SpriteMaterial({
+        map: this.getDetection3DMarkerTexture(),
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        opacity: 1.0,
+        sizeAttenuation: true
+    });
+
+    const marker = new THREE.Sprite(material);
+    marker._detection3d = entry;
+    marker._position = entry.coordinates;
+    marker.center.set(0.5, 0.5);
+    marker.renderOrder = 9999;
+    marker.visible = visible;
+
+    const markerSize = this.state.detection3DMarkerSize;
+    marker.scale.set(markerSize, markerSize, 1);
+    marker.position.set(entry.coordinates[0], entry.coordinates[1], entry.coordinates[2]);
+    return marker;
+  }
+
+  renderOverlay = () => {
+    if (!this.panoramaMeshes.some(marker => marker.visible) &&
+        !this.detection3DMeshes.some(marker => marker.visible)) return;
 
     const camera = viewer.scene.getActiveCamera();
     viewer.renderer.render(this.panoramaOverlayScene, camera);
@@ -765,6 +925,13 @@ class ModelView extends React.Component {
     }
   }
 
+  getDetection3DUnderCursor = (evt) => {
+    const marker = this.getIntersectionUnderCursor(evt, this.detection3DMeshes);
+    if (marker){
+        return marker._detection3d;
+    }
+  }
+
   setCameraOpacity(camera, opacity){
     camera.traverse(obj => {
         if (obj.material) obj.material.opacity = opacity;
@@ -777,10 +944,13 @@ class ModelView extends React.Component {
     }
 
     const camera = this.getCameraUnderCursor(evt);
-    const panorama = camera ? null : this.getPanoramaUnderCursor(evt);
+    const detection3D = camera ? null : this.getDetection3DUnderCursor(evt);
+    const panorama = camera || detection3D ? null : this.getPanoramaUnderCursor(evt);
     if (camera){
         viewer.renderer.domElement.classList.add("pointer-cursor");
         this.setCameraOpacity(camera, 1);
+    }else if (detection3D){
+        viewer.renderer.domElement.classList.add("pointer-cursor");
     }else if (panorama){
         viewer.renderer.domElement.classList.add("pointer-cursor");
     }else{
@@ -799,21 +969,34 @@ class ModelView extends React.Component {
     let camera = this.getCameraUnderCursor(evt);
     // Deselect
     if (camera === this.state.selectedCamera){
-        this.setState({selectedCamera: null, selectedPanorama: null});
+        this.setState({selectedCamera: null, selectedPanorama: null, selectedDetection3D: null});
     }else if (camera){
         if (this.state.selectedCamera){
             this.setCameraOpacity(this.state.selectedCamera, 0.7);
         }
-        this.setState({selectedCamera: camera, selectedPanorama: null});
+        this.setState({selectedCamera: camera, selectedPanorama: null, selectedDetection3D: null});
     }else{
+        const detection3D = this.getDetection3DUnderCursor(evt);
+        if (detection3D){
+            if (this.state.selectedCamera){
+                this.setCameraOpacity(this.state.selectedCamera, 0.7);
+            }
+            if (this.state.selectedDetection3D && this.state.selectedDetection3D.id === detection3D.id){
+                this.setState({selectedCamera: null, selectedPanorama: null, selectedDetection3D: null});
+            }else{
+                this.setState({selectedCamera: null, selectedPanorama: null, selectedDetection3D: detection3D});
+            }
+            return;
+        }
+
         const panorama = this.getPanoramaUnderCursor(evt);
         if (panorama && this.state.selectedPanorama && this.state.selectedPanorama.filename === panorama.filename){
-            this.setState({selectedPanorama: null});
+            this.setState({selectedPanorama: null, selectedDetection3D: null});
         }else if (panorama){
             if (this.state.selectedCamera){
                 this.setCameraOpacity(this.state.selectedCamera, 0.7);
             }
-            this.setState({selectedCamera: null, selectedPanorama: panorama});
+            this.setState({selectedCamera: null, selectedPanorama: panorama, selectedDetection3D: null});
         }
     }
   }
@@ -825,6 +1008,10 @@ class ModelView extends React.Component {
 
   closePanorama = () => {
     this.setState({selectedPanorama: null});
+  }
+
+  closeDetection3D = () => {
+    this.setState({selectedDetection3D: null});
   }
 
   loadCameras(){
@@ -921,6 +1108,17 @@ class ModelView extends React.Component {
     });
   }
 
+  loadDetection3D = (visible) => {
+    if (this.detection3DMarkersLoaded) return;
+
+    this.detection3DEntries.forEach(entry => {
+        const marker = this.createDetection3DMarker(entry, visible);
+        this.panoramaOverlayScene.add(marker);
+        this.detection3DMeshes.push(marker);
+    });
+    this.detection3DMarkersLoaded = true;
+  }
+
   setPointCloudsVisible = (flag) => {
     viewer.setEDLEnabled(true);
     
@@ -970,9 +1168,36 @@ class ModelView extends React.Component {
     });
   }
 
+  toggleDetection3D = (e) => {
+    const visible = e.target.checked;
+    if (visible && !this.detection3DMarkersLoaded){
+        this.loadDetection3D(true);
+        return;
+    }
+
+    this.detection3DMeshes.forEach(marker => {
+        marker.visible = visible;
+    });
+    if (!visible){
+        this.setState({selectedDetection3D: null});
+    }
+  }
+
   changePanoramaMarkerSize = (value) => {
     this.setState({panoramaMarkerSize: value});
     this.panoramaMeshes.forEach(marker => {
+        marker.scale.set(value, value, 1);
+        marker.position.set(
+            marker._position[0],
+            marker._position[1],
+            marker._position[2]
+        );
+    });
+  }
+
+  changeDetection3DMarkerSize = (value) => {
+    this.setState({detection3DMarkerSize: value});
+    this.detection3DMeshes.forEach(marker => {
         marker.scale.set(value, value, 1);
         marker.position.set(
             marker._position[0],
@@ -1081,7 +1306,7 @@ class ModelView extends React.Component {
 
   // React render
   render(){
-    const { selectedCamera, selectedPanorama, showingTexturedModel } = this.state;
+    const { selectedCamera, selectedPanorama, selectedDetection3D, showingTexturedModel } = this.state;
     const { task } = this.props;
     const queryParams = {};
     if (showingTexturedModel){
@@ -1135,6 +1360,28 @@ class ModelView extends React.Component {
             autoOpen
             onClose={this.closePanorama}
         /> : ""}
+
+        {selectedDetection3D ? <div className="thumbnail detection3d-popup">
+            <a className="close-thumb" href="javascript:void(0)" onClick={this.closeDetection3D}><i className="fa fa-window-close"></i></a>
+            <div className="detection3d-popup__title">{selectedDetection3D.displayLabel}</div>
+            <table className="table table-striped table-condensed">
+                <tbody>
+                    <tr><th>{_("Coordinates")}</th><td>{selectedDetection3D.coordinates.map(value => value.toFixed(3)).join(", ")}</td></tr>
+                    <tr><th>{_("Method")}</th><td>{selectedDetection3D.localization_method || "-"}</td></tr>
+                    <tr><th>{_("Uncertainty")}</th><td>{selectedDetection3D.uncertainty === null ? "-" : selectedDetection3D.uncertainty.toFixed(3)}</td></tr>
+                    <tr><th>{_("Dimensions")}</th><td>{selectedDetection3D.dimensions ? selectedDetection3D.dimensions.map(value => value.toFixed(3)).join(", ") : "-"}</td></tr>
+                    <tr><th>{_("Supporting images")}</th><td>{selectedDetection3D.supporting_image_count}</td></tr>
+                </tbody>
+            </table>
+            {selectedDetection3D.supporting_detections.length > 0 ? <div className="detection3d-popup__supporting">
+                <div className="detection3d-popup__subtitle">{_("Supporting detections")}</div>
+                <ul>
+                    {selectedDetection3D.supporting_detections.slice(0, 5).map((entry, index) => <li key={index}>
+                        {[entry.room, entry.scan_id, entry.text].filter(Boolean).join(" / ")}
+                    </li>)}
+                </ul>
+            </div> : ""}
+        </div> : ""}
 
           <Standby 
             message={_("Loading textured model...")}
